@@ -113,6 +113,14 @@ export function InviteSignup({ token }: { token: string }) {
                     <Input name="jobTitle" defaultValue={invite.job_title} />
                   </label>
                 </div>
+                <label className="grid gap-2 text-sm font-semibold">
+                  Password
+                  <Input name="password" type="password" autoComplete="new-password" required minLength={8} />
+                </label>
+                <label className="grid gap-2 text-sm font-semibold">
+                  Confirm password
+                  <Input name="confirmPassword" type="password" autoComplete="new-password" required minLength={8} />
+                </label>
                 <Button type="submit" disabled={saving} className="w-full rounded-xl bg-[#3d3a82]">
                   {saving ? "Creating account..." : "Join workspace"}
                   <CheckCircle2 className="size-4" />

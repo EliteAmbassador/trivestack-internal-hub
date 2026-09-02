@@ -50,6 +50,10 @@ export default function LoginPage() {
             Email
             <Input name="email" type="email" placeholder="name@trivestack.com" required />
           </label>
+          <label className="grid gap-2 text-sm font-semibold text-[#312e4c]">
+            Password
+            <Input name="password" type="password" autoComplete="current-password" required />
+          </label>
           <Button type="submit" disabled={saving} className="w-full rounded-xl bg-[#3d3a82]">
             <LogIn className="size-4" />
             {saving ? "Logging in..." : "Login"}

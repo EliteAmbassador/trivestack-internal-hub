@@ -1337,6 +1337,15 @@ function ProfileDialog({
             <Field label="Team"><Input name="team" defaultValue={user.team} /></Field>
             <Field label="Job title"><Input name="jobTitle" defaultValue={user.job_title} /></Field>
           </div>
+          <div className="rounded-xl border bg-slate-50 p-4">
+            <h3 className="text-sm font-bold text-[#201e38]">Change password</h3>
+            <p className="mt-1 text-xs text-slate-500">Leave these blank to keep your current password.</p>
+            <div className="mt-4 grid gap-4">
+              <Field label="Current password"><Input name="currentPassword" type="password" autoComplete="current-password" /></Field>
+              <Field label="New password"><Input name="newPassword" type="password" autoComplete="new-password" minLength={8} /></Field>
+              <Field label="Confirm new password"><Input name="confirmPassword" type="password" autoComplete="new-password" minLength={8} /></Field>
+            </div>
+          </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="submit" className="bg-[#3d3a82]">Save profile</Button>

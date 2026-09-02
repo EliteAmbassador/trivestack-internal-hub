@@ -1,7 +1,8 @@
-import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
 
-export const users = sqliteTable("users", {
+const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+
+export const users = pgTable("users", {
   id: text("id").primaryKey(),
   fullName: text("full_name").notNull(),
   email: text("email").notNull().unique(),
@@ -9,10 +10,10 @@ export const users = sqliteTable("users", {
   team: text("team").notNull().default("Product"),
   jobTitle: text("job_title").notNull().default("Team Member"),
   status: text("status").notNull().default("active"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: createdAt(),
 });
 
-export const projects = sqliteTable("projects", {
+export const projects = pgTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull().unique(),
   description: text("description").notNull().default(""),
@@ -21,10 +22,10 @@ export const projects = sqliteTable("projects", {
   status: text("status").notNull().default("active"),
   startDate: text("start_date"),
   endDate: text("end_date"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: createdAt(),
 });
 
-export const reports = sqliteTable("reports", {
+export const reports = pgTable("reports", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
   reportType: text("report_type").notNull(),
@@ -40,30 +41,30 @@ export const reports = sqliteTable("reports", {
   priority: text("priority").notNull().default("medium"),
   status: text("status").notNull().default("in_progress"),
   additionalNotes: text("additional_notes").notNull().default(""),
-  submittedAt: text("submitted_at"),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  createdAt: createdAt(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const comments = sqliteTable("comments", {
+export const comments = pgTable("comments", {
   id: text("id").primaryKey(),
   reportId: text("report_id").notNull().references(() => reports.id),
   userId: text("user_id").notNull().references(() => users.id),
   comment: text("comment").notNull(),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: createdAt(),
 });
 
-export const auditLogs = sqliteTable("audit_logs", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+export const auditLogs = pgTable("audit_logs", {
+  id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
   action: text("action").notNull(),
   entityType: text("entity_type").notNull(),
   entityId: text("entity_id").notNull(),
   details: text("details").notNull().default(""),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: createdAt(),
 });
 
-export const invitations = sqliteTable("invitations", {
+export const invitations = pgTable("invitations", {
   id: text("id").primaryKey(),
   token: text("token").notNull().unique(),
   email: text("email").notNull(),
@@ -72,22 +73,22 @@ export const invitations = sqliteTable("invitations", {
   jobTitle: text("job_title").notNull().default("Team Member"),
   invitedBy: text("invited_by").notNull().references(() => users.id),
   status: text("status").notNull().default("pending"),
-  expiresAt: text("expires_at").notNull(),
-  acceptedAt: text("accepted_at"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
   acceptedBy: text("accepted_by").references(() => users.id),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: createdAt(),
 });
 
-export const sessions = sqliteTable("sessions", {
+export const sessions = pgTable("sessions", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => users.id),
   token: text("token").notNull().unique(),
-  expiresAt: text("expires_at").notNull(),
-  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: createdAt(),
 });
 
-export const workspaceSettings = sqliteTable("workspace_settings", {
+export const workspaceSettings = pgTable("workspace_settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
-  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
