@@ -62,3 +62,32 @@ export const auditLogs = sqliteTable("audit_logs", {
   details: text("details").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const invitations = sqliteTable("invitations", {
+  id: text("id").primaryKey(),
+  token: text("token").notNull().unique(),
+  email: text("email").notNull(),
+  role: text("role").notNull().default("team_member"),
+  team: text("team").notNull().default("Product"),
+  jobTitle: text("job_title").notNull().default("Team Member"),
+  invitedBy: text("invited_by").notNull().references(() => users.id),
+  status: text("status").notNull().default("pending"),
+  expiresAt: text("expires_at").notNull(),
+  acceptedAt: text("accepted_at"),
+  acceptedBy: text("accepted_by").references(() => users.id),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const sessions = sqliteTable("sessions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  token: text("token").notNull().unique(),
+  expiresAt: text("expires_at").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const workspaceSettings = sqliteTable("workspace_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

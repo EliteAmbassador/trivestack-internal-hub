@@ -1,6 +1,28 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 
+const DEFAULT_IDENTITY = {
+  displayName: "Victor Ogunbode",
+  email: "victor@trivestack.com",
+};
+const ALLOWED_EMAIL_DOMAINS = ["trivestack.com"];
+const ROLES = ["team_member", "team_lead", "stakeholder", "super_admin"] as const;
+const REPORT_TYPES = ["daily", "weekly", "monthly"] as const;
+const PRIORITIES = ["low", "medium", "high", "critical"] as const;
+const REPORT_STATUSES = ["not_started", "in_progress", "completed", "blocked", "delayed", "on_hold", "needs_review"] as const;
+const PROJECT_STATUSES = ["active", "paused", "completed"] as const;
+const DEMO_EMAILS = ["ceo@trivestack.com", "cto@trivestack.com", "raymond@trivestack.com", "nobert@trivestack.com"];
+const DEMO_REPORT_COMPLETED_WORK = [
+  "Reviewed bulk catalogue upload and inventory intelligence requirements.",
+  "Completed payment reconciliation flow and merchant wallet review.",
+  "Prepared social commerce ordering flow notes for engineering review.",
+  "Aligned delivery-partner fulfilment requirements with operations.",
+  "Mapped merchant onboarding requirements and risk checks.",
+];
+const SESSION_COOKIE = "trivestack_session";
+const SESSION_DAYS = 30;
+let schemaReady: Promise<void> | null = null;
+
 type DbUser = {
   id: string;
   full_name: string;
@@ -11,9 +33,230 @@ type DbUser = {
   status: string;
 };
 
-async function requireUser() {
+type ReportRow = Record<string, unknown> & {
+  user_id: string;
+  report_type: string;
+  submitted_at: string | null;
+};
+
+type InviteRow = {
+  id: string;
+  token: string;
+  email: string;
+  role: string;
+  team: string;
+  job_title: string;
+  status: string;
+  expires_at: string;
+};
+
+type SettingsRow = {
+  key: string;
+  value: string;
+};
+
+type SubmissionStats = {
+  submittedUsers: number;
+  totalUsers: number;
+  pendingUsers: number;
+};
+
+function isAllowedEmail(email: string) {
+  const normalized = email.trim().toLowerCase();
+  return ALLOWED_EMAIL_DOMAINS.some((domain) => normalized.endsWith(`@${domain}`));
+}
+
+function isOneOf<const T extends readonly string[]>(
+  options: T,
+  value: string | undefined,
+): value is T[number] {
+  return !!value && (options as readonly string[]).includes(value);
+}
+
+function clean(payload: Record<string, unknown>, key: string, fallback = "") {
+  const value = payload[key];
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function validHttpUrl(value: string) {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function longDate(date = new Date()) {
+  return new Intl.DateTimeFormat("en-NG", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+function monthLabel(date = new Date()) {
+  return new Intl.DateTimeFormat("en-NG", {
+    month: "long",
+    year: "numeric",
+  }).format(date);
+}
+
+function weekRange(date = new Date()) {
+  const start = new Date(date);
+  start.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  return `${longDate(start)} - ${longDate(end)}`;
+}
+
+function isLocalRequest(request: Request) {
+  const hostname = new URL(request.url).hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function cookieValue(request: Request, name: string) {
+  const cookie = request.headers.get("cookie") ?? "";
+  return cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
+}
+
+function expiryDate(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString();
+}
+
+function sessionCookie(token: string, request: Request) {
+  const maxAge = SESSION_DAYS * 24 * 60 * 60;
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
+}
+
+function expiredSessionCookie(request: Request) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`;
+}
+
+function inviteUrl(request: Request, token: string) {
+  return new URL(`/invite/${token}`, request.url).toString();
+}
+
+function ensureWorkspaceSchema() {
+  schemaReady ??= env.DB.batch([
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id text PRIMARY KEY NOT NULL, full_name text NOT NULL, email text NOT NULL, role text DEFAULT 'team_member' NOT NULL, team text DEFAULT 'Product' NOT NULL, job_title text DEFAULT 'Team Member' NOT NULL, status text DEFAULT 'active' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, owner_id text, team text DEFAULT 'Product' NOT NULL, status text DEFAULT 'active' NOT NULL, start_date text, end_date text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (owner_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS projects_name_unique ON projects (name)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS reports (id text PRIMARY KEY NOT NULL, user_id text NOT NULL, report_type text NOT NULL, project_id text NOT NULL, period_label text NOT NULL, completed_work text NOT NULL, work_in_progress text DEFAULT '' NOT NULL, planned_work text DEFAULT '' NOT NULL, blockers text DEFAULT '' NOT NULL, support_needed text DEFAULT '' NOT NULL, decisions_needed text DEFAULT '' NOT NULL, documentation_links text DEFAULT '' NOT NULL, priority text DEFAULT 'medium' NOT NULL, status text DEFAULT 'in_progress' NOT NULL, additional_notes text DEFAULT '' NOT NULL, submitted_at text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (project_id) REFERENCES projects(id) ON UPDATE no action ON DELETE no action)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS comments (id text PRIMARY KEY NOT NULL, report_id text NOT NULL, user_id text NOT NULL, comment text NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (report_id) REFERENCES reports(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS audit_logs (id integer PRIMARY KEY AUTOINCREMENT NOT NULL, user_id text NOT NULL, action text NOT NULL, entity_type text NOT NULL, entity_id text NOT NULL, details text DEFAULT '' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS invitations (id text PRIMARY KEY NOT NULL, token text NOT NULL, email text NOT NULL, role text DEFAULT 'team_member' NOT NULL, team text DEFAULT 'Product' NOT NULL, job_title text DEFAULT 'Team Member' NOT NULL, invited_by text NOT NULL, status text DEFAULT 'pending' NOT NULL, expires_at text NOT NULL, accepted_at text, accepted_by text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (invited_by) REFERENCES users(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (accepted_by) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS invitations_token_unique ON invitations (token)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_invitations_email_status ON invitations (email, status)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS sessions (id text PRIMARY KEY NOT NULL, user_id text NOT NULL, token text NOT NULL, expires_at text NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE cascade)"),
+    env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS sessions_token_unique ON sessions (token)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS workspace_settings (key text PRIMARY KEY NOT NULL, value text NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL)"),
+  ]).then(() => undefined);
+  return schemaReady;
+}
+
+async function seedWorkspace(email: string, displayName: string) {
+  const count = await env.DB.prepare("SELECT COUNT(*) AS total FROM users").first<{ total: number }>();
+  if ((count?.total ?? 0) > 0) {
+    await cleanupDemoData(email);
+    await seedDefaultSettings();
+    return;
+  }
+
+  const ownerId = crypto.randomUUID();
+  const projectRows = [
+    [crypto.randomUUID(), "Trivestack Backoffice", "Merchant operations and commerce administration.", ownerId, "Product", "active"],
+    [crypto.randomUUID(), "Trivestack Storefront", "Customer-facing web commerce experience.", ownerId, "Engineering", "active"],
+    [crypto.randomUUID(), "Trivestack Social Commerce", "Social selling and structured conversational orders.", ownerId, "Engineering", "active"],
+    [crypto.randomUUID(), "WhatsApp Shopping Assistant", "AI-assisted product discovery and checkout on WhatsApp.", ownerId, "Engineering", "active"],
+    [crypto.randomUUID(), "Offline Sales Recorder", "Reliable offline transaction and inventory recording.", ownerId, "Product", "paused"],
+    [crypto.randomUUID(), "POS Payment Bridge", "Unified payment-terminal bridge for POS workflows.", ownerId, "Engineering", "active"],
+    [crypto.randomUUID(), "Fulfilment and Delivery", "Fulfilment model and delivery partner integration.", ownerId, "Product", "active"],
+  ];
+
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, 'super_admin', 'Product', 'Product Manager', 'active')").bind(ownerId, displayName || "Victor Ogunbode", email.toLowerCase()),
+    ...projectRows.map((row) => env.DB.prepare("INSERT INTO projects (id, name, description, owner_id, team, status) VALUES (?, ?, ?, ?, ?, ?)").bind(...row)),
+  ]);
+  await seedDefaultSettings();
+}
+
+async function seedDefaultSettings() {
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('dailyReminderTime', '5:00 PM')"),
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('weeklyDueDay', 'friday')"),
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('monthlyDue', 'Last working day')"),
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('inAppReminders', 'true')"),
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('emailReminders', 'true')"),
+    env.DB.prepare("INSERT OR IGNORE INTO workspace_settings (key, value) VALUES ('lateSubmissionAlerts', 'true')"),
+  ]);
+}
+
+async function cleanupDemoData(currentEmail: string) {
+  const currentUser = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(currentEmail.toLowerCase()).first<{ id: string }>();
+  if (!currentUser) return;
+
+  const demoUsers = await env.DB.prepare(`SELECT id FROM users WHERE email IN (${DEMO_EMAILS.map(() => "?").join(",")})`).bind(...DEMO_EMAILS).all<{ id: string }>();
+  const demoUserIds = demoUsers.results.map((user: { id: string }) => user.id);
+  const reportTextPlaceholders = DEMO_REPORT_COMPLETED_WORK.map(() => "?").join(",");
+  const demoReportIds = demoUserIds.length > 0
+    ? await env.DB.prepare(`SELECT id FROM reports WHERE user_id IN (${demoUserIds.map(() => "?").join(",")}) OR completed_work IN (${reportTextPlaceholders})`).bind(...demoUserIds, ...DEMO_REPORT_COMPLETED_WORK).all<{ id: string }>()
+    : await env.DB.prepare(`SELECT id FROM reports WHERE completed_work IN (${reportTextPlaceholders})`).bind(...DEMO_REPORT_COMPLETED_WORK).all<{ id: string }>();
+  const reportIds = demoReportIds.results.map((report: { id: string }) => report.id);
+
+  const cleanupStatements = [];
+  if (reportIds.length > 0) {
+    const reportPlaceholders = reportIds.map(() => "?").join(",");
+    cleanupStatements.push(
+      env.DB.prepare(`DELETE FROM comments WHERE report_id IN (${reportPlaceholders})`).bind(...reportIds),
+      env.DB.prepare(`DELETE FROM audit_logs WHERE entity_type = 'report' AND entity_id IN (${reportPlaceholders})`).bind(...reportIds),
+      env.DB.prepare(`DELETE FROM reports WHERE id IN (${reportPlaceholders})`).bind(...reportIds),
+    );
+  }
+  cleanupStatements.push(env.DB.prepare("UPDATE projects SET owner_id = COALESCE(owner_id, ?)").bind(currentUser.id));
+
+  if (demoUserIds.length > 0) {
+    const placeholders = demoUserIds.map(() => "?").join(",");
+    cleanupStatements.push(
+      env.DB.prepare(`DELETE FROM comments WHERE user_id IN (${placeholders})`).bind(...demoUserIds),
+      env.DB.prepare(`DELETE FROM audit_logs WHERE user_id IN (${placeholders})`).bind(...demoUserIds),
+      env.DB.prepare(`UPDATE projects SET owner_id = ? WHERE owner_id IN (${placeholders})`).bind(currentUser.id, ...demoUserIds),
+      env.DB.prepare(`DELETE FROM sessions WHERE user_id IN (${placeholders})`).bind(...demoUserIds),
+      env.DB.prepare(`DELETE FROM users WHERE id IN (${placeholders})`).bind(...demoUserIds),
+    );
+  }
+
+  await env.DB.batch(cleanupStatements);
+}
+
+async function currentIdentity(request: Request) {
+  const token = cookieValue(request, SESSION_COOKIE);
+  if (token) {
+    const sessionUser = await env.DB.prepare("SELECT u.full_name, u.email FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ? AND u.status = 'active'")
+      .bind(token, new Date().toISOString()).first<{ full_name: string; email: string }>();
+    if (sessionUser) return { displayName: sessionUser.full_name, email: sessionUser.email };
+  }
+
   const identity = await getChatGPTUser();
-  if (!identity) throw new Response("Unauthorized", { status: 401 });
+  if (identity) return { displayName: identity.displayName, email: identity.email };
+
+  throw new Response("Workspace identity unavailable", { status: 403 });
+}
+
+async function requireUser(request: Request) {
+  await ensureWorkspaceSchema();
+  const identity = await currentIdentity(request);
+  if (!isAllowedEmail(identity.email)) throw new Response("Account unavailable", { status: 403 });
   await seedWorkspace(identity.email, identity.displayName);
   const user = await env.DB.prepare("SELECT id, full_name, email, role, team, job_title, status FROM users WHERE email = ?")
     .bind(identity.email.toLowerCase()).first<DbUser>();
@@ -21,63 +264,119 @@ async function requireUser() {
   return user;
 }
 
-async function seedWorkspace(email: string, displayName: string) {
-  const count = await env.DB.prepare("SELECT COUNT(*) AS total FROM users").first<{ total: number }>();
-  if ((count?.total ?? 0) > 0) {
-    await env.DB.prepare("INSERT OR IGNORE INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, 'team_member', 'Product', 'Team Member', 'active')")
-      .bind(crypto.randomUUID(), displayName || email, email.toLowerCase()).run();
-    return;
-  }
-
-  const ownerId = crypto.randomUUID();
-  const ceoId = crypto.randomUUID();
-  const ctoId = crypto.randomUUID();
-  const raymondId = crypto.randomUUID();
-  const nobertId = crypto.randomUUID();
-  const projectRows = [
-    [crypto.randomUUID(), "Trivestack Backoffice", "Merchant operations and commerce administration.", ownerId, "Product", "active"],
-    [crypto.randomUUID(), "Trivestack Storefront", "Customer-facing web commerce experience.", nobertId, "Engineering", "active"],
-    [crypto.randomUUID(), "Trivestack Social Commerce", "Social selling and structured conversational orders.", raymondId, "Engineering", "active"],
-    [crypto.randomUUID(), "WhatsApp Shopping Assistant", "AI-assisted product discovery and checkout on WhatsApp.", raymondId, "Engineering", "active"],
-    [crypto.randomUUID(), "Offline Sales Recorder", "Reliable offline transaction and inventory recording.", ownerId, "Product", "paused"],
-    [crypto.randomUUID(), "POS Payment Bridge", "Unified payment-terminal bridge for POS workflows.", ctoId, "Engineering", "active"],
-    [crypto.randomUUID(), "Fulfilment and Delivery", "Fulfilment model and delivery partner integration.", ownerId, "Product", "active"],
-  ];
-
-  const statements = [
-    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(ownerId, displayName || "Victor Ogunbode", email.toLowerCase(), "super_admin", "Product", "Product Manager"),
-    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(ceoId, "CEO User", "ceo@trivestack.com", "stakeholder", "Leadership", "CEO"),
-    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(ctoId, "CTO User", "cto@trivestack.com", "stakeholder", "Leadership", "CTO"),
-    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(raymondId, "Raymond", "raymond@trivestack.com", "team_member", "Engineering", "Social Commerce Lead"),
-    env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(nobertId, "Nobert", "nobert@trivestack.com", "team_member", "Engineering", "Storefront Lead"),
-    ...projectRows.map((row) => env.DB.prepare("INSERT INTO projects (id, name, description, owner_id, team, status) VALUES (?, ?, ?, ?, ?, ?)").bind(...row)),
-  ];
-  await env.DB.batch(statements);
-
-  const reportSeed = [
-    [raymondId, 3, "weekly", "Aug 24–30, 2026", "Improved product search and refined the WhatsApp cart update flow.", "Testing multi-category product discovery.", "Complete cart quantity update and merchant pilot test.", "Payment provider test credentials pending.", "Credentials from engineering leadership.", "Confirm pilot merchants.", "https://docs.google.com/whatsapp-commerce", "high", "in_progress"],
-    [nobertId, 1, "weekly", "Aug 24–30, 2026", "Updated storefront checkout and fulfilment selection.", "Mobile validation and accessibility clean-up.", "Complete order confirmation states.", "", "", "", "https://figma.com/storefront", "medium", "completed"],
-    [ownerId, 0, "daily", "Aug 31, 2026", "Reviewed bulk catalogue upload and inventory intelligence requirements.", "Preparing product specifications for engineering.", "Align scope with technical lead.", "Merchant source data formats are inconsistent.", "Engineering feasibility input.", "Choose XLSX import validation approach.", "https://docs.google.com/backoffice-prd", "high", "needs_review"],
-    [ctoId, 5, "monthly", "August 2026", "Completed terminal provider technical assessment.", "Simulator testing for CBS and NIBSS.", "Validate authoritative webhook flow.", "Production-grade provider credentials unavailable.", "Escalation to payment partner.", "Confirm fallback reconciliation process.", "https://docs.google.com/pos-bridge", "critical", "blocked"],
-  ];
-  await env.DB.batch(reportSeed.map((r) => env.DB.prepare("INSERT INTO reports (id, user_id, project_id, report_type, period_label, completed_work, work_in_progress, planned_work, blockers, support_needed, decisions_needed, documentation_links, priority, status, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)").bind(crypto.randomUUID(), r[0], projectRows[Number(r[1])][0], ...r.slice(2))));
+async function lookupInvite(token: string) {
+  await ensureWorkspaceSchema();
+  const invite = await env.DB.prepare("SELECT id, token, email, role, team, job_title, status, expires_at FROM invitations WHERE token = ?")
+    .bind(token).first<InviteRow>();
+  if (!invite) return null;
+  return {
+    ...invite,
+    expired: new Date(invite.expires_at).getTime() <= Date.now(),
+  };
 }
 
-export async function GET() {
+async function acceptInvite(payload: Record<string, unknown>, request: Request) {
+  await ensureWorkspaceSchema();
+  const token = clean(payload, "token");
+  const fullName = clean(payload, "fullName");
+  const team = clean(payload, "team");
+  const jobTitle = clean(payload, "jobTitle");
+  if (!token || !fullName) return Response.json({ error: "Invite link and name are required" }, { status: 400 });
+
+  const invite = await lookupInvite(token);
+  if (!invite || invite.status !== "pending" || invite.expired) return Response.json({ error: "Invite link is invalid or expired" }, { status: 400 });
+
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(invite.email).first<{ id: string }>();
+  const userId = existing?.id ?? crypto.randomUUID();
+  const sessionToken = crypto.randomUUID();
+  await env.DB.batch([
+    existing
+      ? env.DB.prepare("UPDATE users SET full_name = ?, role = ?, team = ?, job_title = ?, status = 'active' WHERE id = ?").bind(fullName, invite.role, team || invite.team, jobTitle || invite.job_title, userId)
+      : env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(userId, fullName, invite.email, invite.role, team || invite.team, jobTitle || invite.job_title),
+    env.DB.prepare("UPDATE invitations SET status = 'accepted', accepted_at = CURRENT_TIMESTAMP, accepted_by = ? WHERE id = ?").bind(userId, invite.id),
+    env.DB.prepare("INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), userId, sessionToken, expiryDate(SESSION_DAYS)),
+  ]);
+
+  return Response.json(
+    { ok: true },
+    { status: 201, headers: { "set-cookie": sessionCookie(sessionToken, request) } },
+  );
+}
+
+async function loginUser(payload: Record<string, unknown>, request: Request) {
+  await ensureWorkspaceSchema();
+  const email = clean(payload, "email").toLowerCase();
+  if (!email || !isAllowedEmail(email)) return Response.json({ error: "Use your Trivestack email address" }, { status: 400 });
+
+  const activeUsers = await env.DB.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'active'").first<{ total: number }>();
+  if ((activeUsers?.total ?? 0) === 0 && isLocalRequest(request) && email === DEFAULT_IDENTITY.email) {
+    await seedWorkspace(DEFAULT_IDENTITY.email, DEFAULT_IDENTITY.displayName);
+  }
+
+  const user = await env.DB.prepare("SELECT id, full_name, email FROM users WHERE email = ? AND status = 'active'")
+    .bind(email).first<{ id: string; full_name: string; email: string }>();
+  if (!user) return Response.json({ error: "No active account found. Ask the super admin for an invite." }, { status: 404 });
+
+  const sessionToken = crypto.randomUUID();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? OR expires_at <= ?").bind(user.id, new Date().toISOString()),
+    env.DB.prepare("INSERT INTO sessions (id, user_id, token, expires_at) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), user.id, sessionToken, expiryDate(SESSION_DAYS)),
+  ]);
+  return Response.json(
+    { ok: true, user: { name: user.full_name, email: user.email } },
+    { headers: { "set-cookie": sessionCookie(sessionToken, request) } },
+  );
+}
+
+export async function GET(request: Request) {
   try {
-    const user = await requireUser();
-    const reportSql = user.role === "super_admin" || user.role === "stakeholder"
-      ? "SELECT r.*, u.full_name AS owner_name, u.team AS owner_team, p.name AS project_name FROM reports r JOIN users u ON u.id = r.user_id JOIN projects p ON p.id = r.project_id ORDER BY COALESCE(r.submitted_at, r.created_at) DESC"
-      : user.role === "team_lead"
-        ? "SELECT r.*, u.full_name AS owner_name, u.team AS owner_team, p.name AS project_name FROM reports r JOIN users u ON u.id = r.user_id JOIN projects p ON p.id = r.project_id WHERE u.team = ? ORDER BY COALESCE(r.submitted_at, r.created_at) DESC"
-        : "SELECT r.*, u.full_name AS owner_name, u.team AS owner_team, p.name AS project_name FROM reports r JOIN users u ON u.id = r.user_id JOIN projects p ON p.id = r.project_id WHERE r.user_id = ? ORDER BY COALESCE(r.submitted_at, r.created_at) DESC";
-    const binding = user.role === "team_lead" ? user.team : user.id;
-    const reports = user.role === "super_admin" || user.role === "stakeholder"
-      ? await env.DB.prepare(reportSql).all()
-      : await env.DB.prepare(reportSql).bind(binding).all();
-    const projects = await env.DB.prepare("SELECT p.*, u.full_name AS owner_name, COUNT(r.id) AS report_count FROM projects p LEFT JOIN users u ON u.id = p.owner_id LEFT JOIN reports r ON r.project_id = p.id GROUP BY p.id ORDER BY p.name").all();
-    const users = user.role === "super_admin" ? await env.DB.prepare("SELECT id, full_name, email, role, team, job_title, status, created_at FROM users ORDER BY full_name").all() : { results: [] };
-    return Response.json({ user, reports: reports.results, projects: projects.results, users: users.results });
+    const url = new URL(request.url);
+    const inviteToken = url.searchParams.get("invite");
+    if (inviteToken) {
+      const invite = await lookupInvite(inviteToken);
+      if (!invite) return Response.json({ error: "Invite not found" }, { status: 404 });
+      return Response.json({ invite });
+    }
+
+    const user = await requireUser(request);
+    const leadershipRole = user.role === "super_admin" || user.role === "stakeholder";
+    const reports = await env.DB.prepare("SELECT r.*, u.full_name AS owner_name, u.team AS owner_team, p.name AS project_name FROM reports r JOIN users u ON u.id = r.user_id JOIN projects p ON p.id = r.project_id ORDER BY COALESCE(r.submitted_at, r.created_at) DESC").all<ReportRow>();
+    const projects = await env.DB.prepare("SELECT p.*, COALESCE(u.full_name, 'Unassigned') AS owner_name, COUNT(r.id) AS report_count FROM projects p LEFT JOIN users u ON u.id = p.owner_id LEFT JOIN reports r ON r.project_id = p.id GROUP BY p.id ORDER BY p.name").all();
+    let submissionStats: SubmissionStats | null = null;
+    if (leadershipRole) {
+      const totalUsers = await env.DB.prepare("SELECT COUNT(*) AS total FROM users WHERE status = 'active'").first<{ total: number }>();
+      const submittedUsers = new Set(
+        reports.results
+          .filter((report: ReportRow) => report.report_type === "weekly" && report.submitted_at)
+          .map((report: ReportRow) => report.user_id),
+      ).size;
+      submissionStats = {
+        submittedUsers,
+        totalUsers: totalUsers?.total ?? 0,
+        pendingUsers: Math.max((totalUsers?.total ?? 0) - submittedUsers, 0),
+      };
+    }
+    const users = leadershipRole
+      ? await env.DB.prepare("SELECT id, full_name, email, role, team, job_title, status, created_at FROM users ORDER BY full_name").all<Record<string, unknown>>()
+      : { results: [] };
+    const invitations = user.role === "super_admin"
+      ? await env.DB.prepare("SELECT i.*, u.full_name AS invited_by_name FROM invitations i JOIN users u ON u.id = i.invited_by ORDER BY i.created_at DESC").all<Record<string, unknown> & { token: string }>()
+      : { results: [] };
+    const settingsRows = await env.DB.prepare("SELECT key, value FROM workspace_settings").all<SettingsRow>();
+    const settings = Object.fromEntries(settingsRows.results.map((row: SettingsRow) => [row.key, row.value]));
+
+    return Response.json({
+      user,
+      reports: reports.results,
+      projects: projects.results,
+      users: users.results,
+      invitations: invitations.results.map((invite: Record<string, unknown> & { token: string }) => ({
+        ...invite,
+        invite_url: inviteUrl(request, String(invite.token)),
+      })),
+      settings,
+      submissionStats,
+    });
   } catch (error) {
     if (error instanceof Response) return error;
     return Response.json({ error: error instanceof Error ? error.message : "Unable to load workspace" }, { status: 500 });
@@ -86,47 +385,148 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const user = await requireUser();
-    const payload = await request.json() as Record<string, string>;
-    if (payload.action === "user_role") {
-      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
-      if (!payload.userId || !["team_member", "team_lead", "stakeholder", "super_admin"].includes(payload.role)) return Response.json({ error: "Invalid role update" }, { status: 400 });
+    const payload = await request.json() as Record<string, unknown>;
+    if (payload.action === "login") return loginUser(payload, request);
+    if (payload.action === "logout") {
+      await ensureWorkspaceSchema();
+      const token = cookieValue(request, SESSION_COOKIE);
+      if (token) await env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(token).run();
+      return Response.json({ ok: true }, { headers: { "set-cookie": expiredSessionCookie(request) } });
+    }
+    if (payload.action === "accept_invite") return acceptInvite(payload, request);
+
+    const user = await requireUser(request);
+    if (payload.action === "update_profile") {
+      const fullName = clean(payload, "fullName");
+      if (!fullName) return Response.json({ error: "Full name is required" }, { status: 400 });
       await env.DB.batch([
-        env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(payload.role, payload.userId),
-        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'role_updated', 'user', ?, ?)").bind(user.id, payload.userId, payload.role),
+        env.DB.prepare("UPDATE users SET full_name = ?, team = ?, job_title = ? WHERE id = ?").bind(fullName, clean(payload, "team", user.team), clean(payload, "jobTitle", user.job_title), user.id),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'profile_updated', 'user', ?, ?)").bind(user.id, user.id, fullName),
       ]);
       return Response.json({ ok: true });
     }
 
-    if (payload.action === "add_user") {
+    if (payload.action === "invite_user") {
       if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
-      if (!payload.fullName?.trim() || !payload.email?.trim()) return Response.json({ error: "Name and email are required" }, { status: 400 });
+      const email = clean(payload, "email").toLowerCase();
+      const role = clean(payload, "role", "team_member");
+      if (!email || !isAllowedEmail(email)) return Response.json({ error: "Use a Trivestack email address" }, { status: 400 });
+      if (!isOneOf(ROLES, role)) return Response.json({ error: "Invalid role" }, { status: 400 });
+      const activeUser = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND status = 'active'").bind(email).first();
+      if (activeUser) return Response.json({ error: "That user is already active" }, { status: 400 });
+      const id = crypto.randomUUID();
+      const token = crypto.randomUUID();
+      await env.DB.batch([
+        env.DB.prepare("UPDATE invitations SET status = 'revoked' WHERE email = ? AND status = 'pending'").bind(email),
+        env.DB.prepare("INSERT INTO invitations (id, token, email, role, team, job_title, invited_by, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, token, email, role, clean(payload, "team", "Product"), clean(payload, "jobTitle", "Team Member"), user.id, expiryDate(14)),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'invite_created', 'invitation', ?, ?)").bind(user.id, id, email),
+      ]);
+      return Response.json({ ok: true, inviteUrl: inviteUrl(request, token) }, { status: 201 });
+    }
+
+    if (payload.action === "revoke_invite") {
+      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
+      const inviteId = clean(payload, "inviteId");
+      if (!inviteId) return Response.json({ error: "Invite is required" }, { status: 400 });
+      await env.DB.batch([
+        env.DB.prepare("UPDATE invitations SET status = 'revoked' WHERE id = ? AND status = 'pending'").bind(inviteId),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'invite_revoked', 'invitation', ?, '')").bind(user.id, inviteId),
+      ]);
+      return Response.json({ ok: true });
+    }
+
+    if (payload.action === "user_role") {
+      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
+      const userId = clean(payload, "userId");
+      const role = clean(payload, "role");
+      if (!userId || userId === user.id || !isOneOf(ROLES, role)) return Response.json({ error: "Invalid role update" }, { status: 400 });
+      const target = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first<{ id: string }>();
+      if (!target) return Response.json({ error: "User not found" }, { status: 404 });
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(role, userId),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'role_updated', 'user', ?, ?)").bind(user.id, userId, role),
+      ]);
+      return Response.json({ ok: true });
+    }
+
+    if (payload.action === "user_status") {
+      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
+      const userId = clean(payload, "userId");
+      const status = clean(payload, "status");
+      if (!userId || userId === user.id || !["active", "inactive"].includes(status)) return Response.json({ error: "Invalid status update" }, { status: 400 });
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET status = ? WHERE id = ?").bind(status, userId),
+        env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'user_status_updated', 'user', ?, ?)").bind(user.id, userId, status),
+      ]);
+      return Response.json({ ok: true });
+    }
+
+    if (payload.action === "add_project" || payload.action === "update_project") {
+      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
+      const name = clean(payload, "name");
+      const status = clean(payload, "status", "active");
+      if (!name) return Response.json({ error: "Project name is required" }, { status: 400 });
+      if (!isOneOf(PROJECT_STATUSES, status)) return Response.json({ error: "Invalid project status" }, { status: 400 });
+      if (payload.action === "update_project") {
+        const projectId = clean(payload, "projectId");
+        if (!projectId) return Response.json({ error: "Project is required" }, { status: 400 });
+        await env.DB.batch([
+          env.DB.prepare("UPDATE projects SET name = ?, description = ?, team = ?, status = ? WHERE id = ?").bind(name, clean(payload, "description"), clean(payload, "team", "Product"), status, projectId),
+          env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'project_updated', 'project', ?, ?)").bind(user.id, projectId, name),
+        ]);
+        return Response.json({ ok: true });
+      }
       const id = crypto.randomUUID();
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO users (id, full_name, email, role, team, job_title, status) VALUES (?, ?, ?, ?, ?, ?, 'active')").bind(id, payload.fullName.trim(), payload.email.trim().toLowerCase(), payload.role || "team_member", payload.team || "Product", payload.jobTitle || "Team Member"),
-        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'user_created', 'user', ?, ?)").bind(user.id, id, payload.email.trim().toLowerCase()),
+        env.DB.prepare("INSERT INTO projects (id, name, description, owner_id, team, status) VALUES (?, ?, ?, ?, ?, ?)").bind(id, name, clean(payload, "description"), user.id, clean(payload, "team", "Product"), status),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'project_created', 'project', ?, ?)").bind(user.id, id, name),
       ]);
       return Response.json({ ok: true, id }, { status: 201 });
     }
 
-    if (payload.action === "add_project") {
+    if (payload.action === "delete_project") {
       if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
-      if (!payload.name?.trim()) return Response.json({ error: "Project name is required" }, { status: 400 });
-      const id = crypto.randomUUID();
+      const projectId = clean(payload, "projectId");
+      const linkedReports = await env.DB.prepare("SELECT COUNT(*) AS total FROM reports WHERE project_id = ?").bind(projectId).first<{ total: number }>();
+      if ((linkedReports?.total ?? 0) > 0) return Response.json({ error: "Projects with reports cannot be deleted" }, { status: 400 });
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO projects (id, name, description, owner_id, team, status) VALUES (?, ?, ?, ?, ?, ?)").bind(id, payload.name.trim(), payload.description || "", user.id, payload.team || "Product", payload.status || "active"),
-        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'project_created', 'project', ?, ?)").bind(user.id, id, payload.name.trim()),
+        env.DB.prepare("DELETE FROM projects WHERE id = ?").bind(projectId),
+        env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, 'project_deleted', 'project', ?, '')").bind(user.id, projectId),
       ]);
-      return Response.json({ ok: true, id }, { status: 201 });
+      return Response.json({ ok: true });
     }
 
-    const required = ["reportType", "projectId", "periodLabel", "completedWork", "priority", "status"];
-    if (required.some((key) => !payload[key]?.trim())) return Response.json({ error: "Complete all required fields" }, { status: 400 });
+    if (payload.action === "update_settings") {
+      if (user.role !== "super_admin") return Response.json({ error: "Forbidden" }, { status: 403 });
+      const entries = ["dailyReminderTime", "weeklyDueDay", "monthlyDue", "inAppReminders", "emailReminders", "lateSubmissionAlerts"]
+        .map((key) => [key, clean(payload, key)] as const);
+      await env.DB.batch(entries.map(([key, value]) => env.DB.prepare("INSERT INTO workspace_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP").bind(key, value)));
+      return Response.json({ ok: true });
+    }
+
+    if (user.role === "stakeholder") return Response.json({ error: "Stakeholders cannot create reports" }, { status: 403 });
+    const reportType = clean(payload, "reportType");
+    const projectId = clean(payload, "projectId");
+    const periodLabel = clean(payload, "periodLabel");
+    const completedWork = clean(payload, "completedWork");
+    const priority = clean(payload, "priority");
+    const status = clean(payload, "status");
+    const documentationLinks = clean(payload, "documentationLinks");
+    const submitMode = clean(payload, "submitMode", "submit");
+    if (!reportType || !projectId || !periodLabel || !completedWork || !priority || !status) return Response.json({ error: "Complete all required fields" }, { status: 400 });
+    if (!isOneOf(REPORT_TYPES, reportType)) return Response.json({ error: "Invalid report type" }, { status: 400 });
+    if (!isOneOf(PRIORITIES, priority)) return Response.json({ error: "Invalid priority" }, { status: 400 });
+    if (!isOneOf(REPORT_STATUSES, status)) return Response.json({ error: "Invalid status" }, { status: 400 });
+    if (!["draft", "submit"].includes(submitMode)) return Response.json({ error: "Invalid submit mode" }, { status: 400 });
+    if (!validHttpUrl(documentationLinks)) return Response.json({ error: "Documentation link must be a valid HTTP URL" }, { status: 400 });
+    const project = await env.DB.prepare("SELECT id FROM projects WHERE id = ?").bind(projectId).first<{ id: string }>();
+    if (!project) return Response.json({ error: "Project not found" }, { status: 404 });
     const id = crypto.randomUUID();
-    const submittedAt = payload.submitMode === "draft" ? null : new Date().toISOString();
+    const submittedAt = submitMode === "draft" ? null : new Date().toISOString();
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO reports (id, user_id, report_type, project_id, period_label, completed_work, work_in_progress, planned_work, blockers, support_needed, decisions_needed, documentation_links, priority, status, additional_notes, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, payload.reportType, payload.projectId, payload.periodLabel, payload.completedWork, payload.workInProgress ?? "", payload.plannedWork ?? "", payload.blockers ?? "", payload.supportNeeded ?? "", payload.decisionsNeeded ?? "", payload.documentationLinks ?? "", payload.priority, payload.status, payload.additionalNotes ?? "", submittedAt),
-      env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, 'report', ?, ?)").bind(user.id, submittedAt ? "report_submitted" : "report_drafted", id, payload.reportType),
+      env.DB.prepare("INSERT INTO reports (id, user_id, report_type, project_id, period_label, completed_work, work_in_progress, planned_work, blockers, support_needed, decisions_needed, documentation_links, priority, status, additional_notes, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, reportType, projectId, periodLabel, completedWork, clean(payload, "workInProgress"), clean(payload, "plannedWork"), clean(payload, "blockers"), clean(payload, "supportNeeded"), clean(payload, "decisionsNeeded"), documentationLinks, priority, status, clean(payload, "additionalNotes"), submittedAt),
+      env.DB.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, 'report', ?, ?)").bind(user.id, submittedAt ? "report_submitted" : "report_drafted", id, reportType),
     ]);
     return Response.json({ ok: true, id }, { status: 201 });
   } catch (error) {
