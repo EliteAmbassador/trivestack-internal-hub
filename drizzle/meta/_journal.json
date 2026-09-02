@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1788176024106,
+      "tag": "0000_greedy_firebrand",
+      "breakpoints": true
+    }
+  ]
+}
