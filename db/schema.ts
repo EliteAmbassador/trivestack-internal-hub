@@ -31,6 +31,7 @@ export const reports = pgTable("reports", {
   userId: text("user_id").notNull().references(() => users.id),
   reportType: text("report_type").notNull(),
   projectId: text("project_id").notNull().references(() => projects.id),
+  reportDate: text("report_date"),
   periodLabel: text("period_label").notNull(),
   completedWork: text("completed_work").notNull(),
   workInProgress: text("work_in_progress").notNull().default(""),

@@ -112,6 +112,7 @@ type Report = {
   report_type: string;
   project_id: string;
   project_name: string;
+  report_date: string | null;
   period_label: string;
   completed_work: string;
   work_in_progress: string;
@@ -235,6 +236,18 @@ const prettyDate = (date?: string | null) =>
         minute: "2-digit",
       }).format(new Date(date))
     : "Draft";
+const todayInputValue = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+const dateFromInput = (value: string) => {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+};
+const validDateInput = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value);
 const longDate = (date = new Date()) =>
   new Intl.DateTimeFormat("en-NG", {
     weekday: "long",
@@ -256,6 +269,15 @@ const weekRange = (date = new Date()) => {
   });
   return `${format.format(start)} - ${format.format(end)}`;
 };
+const reportPeriodLabel = (type: string, reportDate: string) => {
+  if (!validDateInput(reportDate)) return "";
+  const date = dateFromInput(reportDate);
+  if (type === "weekly") return weekRange(date);
+  if (type === "monthly") return monthLabel(date);
+  return longDate(date);
+};
+const reportDisplayDate = (report: Report) =>
+  report.report_date ? longDate(dateFromInput(report.report_date)) : prettyDate(report.submitted_at || report.created_at);
 
 async function postAction(payload: Record<string, unknown>) {
   const response = await fetch("/api/workspace", {
@@ -637,7 +659,9 @@ function Dashboard({
 
 function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => Promise<void> }) {
   const [type, setType] = useState("daily");
+  const [reportDate, setReportDate] = useState(todayInputValue());
   const [saving, setSaving] = useState(false);
+  const periodLabel = reportPeriodLabel(type, reportDate);
 
   async function submit(event: React.FormEvent<HTMLFormElement>, mode: "draft" | "submit") {
     event.preventDefault();
@@ -648,6 +672,7 @@ function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => 
       await postAction({ ...values, reportType: type, submitMode: mode });
       toast.success(mode === "draft" ? "Report saved as draft" : "Report submitted");
       form.reset();
+      setReportDate(todayInputValue());
       await onSaved();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save report");
@@ -682,8 +707,19 @@ function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => 
               </SelectContent>
             </Select>
           </Field>
-          <Field label={type === "daily" ? "Date" : type === "weekly" ? "Week range" : "Month"} required>
-            <Input key={type} name="periodLabel" defaultValue={type === "daily" ? longDate() : type === "weekly" ? weekRange() : monthLabel()} required />
+          <Field label="Report date" required>
+            <Input
+              name="reportDate"
+              type="date"
+              value={reportDate}
+              max={todayInputValue()}
+              onChange={(event) => setReportDate(event.target.value)}
+              required
+            />
+            <input type="hidden" name="periodLabel" value={periodLabel} />
+            <span className="text-xs font-medium text-slate-500">
+              {type === "weekly" ? `Week of ${periodLabel}` : type === "monthly" ? periodLabel : periodLabel}
+            </span>
           </Field>
           <Field label={type === "monthly" ? "Major achievements" : type === "weekly" ? "Key tasks completed" : "What I worked on today"} required wide>
             <Textarea name="completedWork" rows={4} placeholder="Use short, specific statements..." required />
@@ -1063,7 +1099,7 @@ function TeamView({ users, reports }: { users: User[]; reports: Report[] }) {
                     <TableCell><div className="flex items-center gap-3"><Avatar name={user.full_name} /><div><p className="font-semibold">{user.full_name}</p><p className="text-xs text-slate-400">{user.job_title}</p></div></div></TableCell>
                     <TableCell>{titleCase(user.role)}</TableCell>
                     <TableCell>{user.team}</TableCell>
-                    <TableCell>{last ? prettyDate(last.submitted_at || last.created_at) : "No report"}</TableCell>
+                    <TableCell>{last ? reportDisplayDate(last) : "No report"}</TableCell>
                     <TableCell>{last ? <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50"><CheckCircle2 className="size-3" />Submitted</Badge> : <Badge className="bg-amber-50 text-amber-700 hover:bg-amber-50"><CircleDot className="size-3" />Pending</Badge>}</TableCell>
                   </TableRow>
                 );
@@ -1367,7 +1403,7 @@ function ReportTable({ reports, onSelect }: { reports: Report[]; onSelect: (repo
             <TableCell className="text-xs font-medium">{titleCase(report.report_type)}</TableCell>
             <TableCell><StatusBadge status={report.status} /></TableCell>
             <TableCell className="hidden md:table-cell"><span className={report.priority === "critical" ? "font-semibold text-rose-600" : report.priority === "high" ? "font-semibold text-orange-600" : "text-slate-500"}>{titleCase(report.priority)}</span></TableCell>
-            <TableCell className="hidden pr-6 text-right text-xs text-slate-400 lg:table-cell">{prettyDate(report.submitted_at || report.created_at)}</TableCell>
+            <TableCell className="hidden pr-6 text-right text-xs text-slate-400 lg:table-cell">{reportDisplayDate(report)}</TableCell>
           </TableRow>
         ))}
       </TableBody>

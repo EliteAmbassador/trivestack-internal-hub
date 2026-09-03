@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS reports (
   user_id text NOT NULL REFERENCES users(id) ON UPDATE no action ON DELETE no action,
   report_type text NOT NULL,
   project_id text NOT NULL REFERENCES projects(id) ON UPDATE no action ON DELETE no action,
+  report_date text,
   period_label text NOT NULL,
   completed_work text NOT NULL,
   work_in_progress text DEFAULT '' NOT NULL,
