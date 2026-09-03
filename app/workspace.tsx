@@ -154,6 +154,16 @@ type WorkspaceData = {
     pendingUsers: number;
   } | null;
 };
+type ReportDraftFields = {
+  completedWork: string;
+  workInProgress: string;
+  plannedWork: string;
+  blockers: string;
+  supportNeeded: string;
+  decisionsNeeded: string;
+  documentationLinks: string;
+  additionalNotes: string;
+};
 type ViewId =
   | "dashboard"
   | "add"
@@ -236,13 +246,13 @@ const prettyDate = (date?: string | null) =>
         minute: "2-digit",
       }).format(new Date(date))
     : "Draft";
-const todayInputValue = () => {
-  const date = new Date();
+const dateToInputValue = (date: Date) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 };
+const todayInputValue = () => dateToInputValue(new Date());
 const dateFromInput = (value: string) => {
   const [year, month, day] = value.split("-").map(Number);
   return new Date(year, month - 1, day);
@@ -278,6 +288,54 @@ const reportPeriodLabel = (type: string, reportDate: string) => {
 };
 const reportDisplayDate = (report: Report) =>
   report.report_date ? longDate(dateFromInput(report.report_date)) : prettyDate(report.submitted_at || report.created_at);
+const reportDateInputValue = (report: Report) => {
+  if (report.report_date) return report.report_date;
+  const fallbackDate = new Date(report.submitted_at || report.created_at);
+  return Number.isNaN(fallbackDate.getTime()) ? "" : dateToInputValue(fallbackDate);
+};
+const reportSubmittedDateInputValue = (report: Report) => {
+  const date = new Date(report.submitted_at || report.created_at);
+  return Number.isNaN(date.getTime()) ? "" : dateToInputValue(date);
+};
+const weekBounds = (dateInput: string) => {
+  const start = dateFromInput(dateInput);
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+  return { start: dateToInputValue(start), end: dateToInputValue(end) };
+};
+const emptyReportDraftFields = (): ReportDraftFields => ({
+  completedWork: "",
+  workInProgress: "",
+  plannedWork: "",
+  blockers: "",
+  supportNeeded: "",
+  decisionsNeeded: "",
+  documentationLinks: "",
+  additionalNotes: "",
+});
+const fieldMap: Record<keyof ReportDraftFields, keyof Report> = {
+  completedWork: "completed_work",
+  workInProgress: "work_in_progress",
+  plannedWork: "planned_work",
+  blockers: "blockers",
+  supportNeeded: "support_needed",
+  decisionsNeeded: "decisions_needed",
+  documentationLinks: "documentation_links",
+  additionalNotes: "additional_notes",
+};
+const sourceLine = (report: Report, value: string) => `- ${report.period_label}: ${value}`;
+const compiledSection = (reports: Report[], field: keyof ReportDraftFields) =>
+  reports
+    .map((report) => {
+      const value = String(report[fieldMap[field]] ?? "").trim();
+      return value ? sourceLine(report, value) : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+const priorityWeight: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+const highestPriority = (reports: Report[]) =>
+  reports.reduce((winner, report) => (priorityWeight[report.priority] > priorityWeight[winner] ? report.priority : winner), "medium");
 
 async function postAction(payload: Record<string, unknown>) {
   const response = await fetch("/api/workspace", {
@@ -484,7 +542,12 @@ export function ProductWorkspace({ user: identity }: { user: AppUser }) {
                 <Dashboard data={data} isAdmin={isAdmin} isLeadership={isLeadership} onNavigate={navigate} onSelect={setSelectedReport} />
               )}
               {view === "add" && (
-                <AddReport projects={data.projects} onSaved={async () => { await loadWorkspace(); navigate("my-reports"); }} />
+                <AddReport
+                  projects={data.projects}
+                  reports={data.reports}
+                  currentUser={data.user}
+                  onSaved={async () => { await loadWorkspace(); navigate("my-reports"); }}
+                />
               )}
               {(view === "my-reports" || view === "all-reports") && (
                 <ReportsView
@@ -546,6 +609,7 @@ function Dashboard({
   const hasReports = data.reports.length > 0;
   const ownReports = data.reports.filter((report) => report.user_id === data.user.id);
   const ownDrafts = ownReports.filter((report) => !report.submitted_at);
+  const canQuickAddReport = data.user.role === "team_member" || data.user.role === "team_lead";
 
   return (
     <>
@@ -558,6 +622,12 @@ function Dashboard({
             {isLeadership && data.users.length > 0 && (
               <Button variant="outline" onClick={() => onNavigate("team")} className="rounded-xl bg-white">
                 View submissions
+              </Button>
+            )}
+            {canQuickAddReport && (
+              <Button variant="outline" onClick={() => onNavigate("add")} className="rounded-xl bg-white">
+                <FilePlus2 className="size-4" />
+                Add report
               </Button>
             )}
             <Button onClick={() => onNavigate("generate")} className="rounded-xl bg-[#ff7d66] font-semibold text-[#271b33] hover:bg-[#ff6b52]">
@@ -657,11 +727,89 @@ function Dashboard({
   );
 }
 
-function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => Promise<void> }) {
+function AddReport({
+  projects,
+  reports,
+  currentUser,
+  onSaved,
+}: {
+  projects: Project[];
+  reports: Report[];
+  currentUser: User;
+  onSaved: () => Promise<void>;
+}) {
   const [type, setType] = useState("daily");
+  const [projectId, setProjectId] = useState("");
   const [reportDate, setReportDate] = useState(todayInputValue());
+  const [priority, setPriority] = useState("medium");
+  const [statusValue, setStatusValue] = useState("in_progress");
+  const [draftFields, setDraftFields] = useState<ReportDraftFields>(emptyReportDraftFields);
   const [saving, setSaving] = useState(false);
   const periodLabel = reportPeriodLabel(type, reportDate);
+
+  function updateDraftField(field: keyof ReportDraftFields, value: string) {
+    setDraftFields((current) => ({ ...current, [field]: value }));
+  }
+
+  function resetReportForm() {
+    setProjectId("");
+    setReportDate(todayInputValue());
+    setPriority("medium");
+    setStatusValue("in_progress");
+    setDraftFields(emptyReportDraftFields());
+  }
+
+  function generatedStatus(sourceReports: Report[]) {
+    if (sourceReports.some((report) => report.status === "blocked")) return "blocked";
+    if (sourceReports.every((report) => report.status === "completed")) return "completed";
+    if (sourceReports.some((report) => report.status === "needs_review")) return "needs_review";
+    return "in_progress";
+  }
+
+  function generatePeriodReport() {
+    if (type === "daily") return;
+    if (!projectId) {
+      toast.error("Choose a project first.");
+      return;
+    }
+    if (!validDateInput(reportDate)) {
+      toast.error("Choose a valid report date.");
+      return;
+    }
+
+    const sourceType = type === "weekly" ? "daily" : "weekly";
+    const bounds = weekBounds(reportDate);
+    const selectedSources = reports
+      .filter((report) => {
+        if (report.user_id !== currentUser.id) return false;
+        if (report.project_id !== projectId) return false;
+        if (report.report_type !== sourceType) return false;
+        if (!report.submitted_at) return false;
+        const sourceDate = reportDateInputValue(report);
+        if (type === "weekly") return sourceDate >= bounds.start && sourceDate <= bounds.end;
+        return sourceDate.startsWith(reportDate.slice(0, 7));
+      })
+      .sort((left, right) => reportDateInputValue(left).localeCompare(reportDateInputValue(right)));
+
+    if (selectedSources.length === 0) {
+      toast.info(type === "weekly" ? "No submitted daily reports found for that week." : "No submitted weekly reports found for that month.");
+      return;
+    }
+
+    setDraftFields({
+      completedWork: compiledSection(selectedSources, "completedWork"),
+      workInProgress: compiledSection(selectedSources, "workInProgress"),
+      plannedWork: compiledSection(selectedSources, "plannedWork"),
+      blockers: compiledSection(selectedSources, "blockers"),
+      supportNeeded: compiledSection(selectedSources, "supportNeeded"),
+      decisionsNeeded: compiledSection(selectedSources, "decisionsNeeded"),
+      documentationLinks: selectedSources.map((report) => report.documentation_links.trim()).find(Boolean) ?? "",
+      additionalNotes: `Generated from ${selectedSources.length} ${sourceType} ${selectedSources.length === 1 ? "report" : "reports"}.`,
+    });
+    setPriority(highestPriority(selectedSources));
+    setStatusValue(generatedStatus(selectedSources));
+    toast.success(type === "weekly" ? "Weekly report drafted from daily reports." : "Monthly report drafted from weekly reports.");
+  }
 
   async function submit(event: React.FormEvent<HTMLFormElement>, mode: "draft" | "submit") {
     event.preventDefault();
@@ -672,7 +820,7 @@ function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => 
       await postAction({ ...values, reportType: type, submitMode: mode });
       toast.success(mode === "draft" ? "Report saved as draft" : "Report submitted");
       form.reset();
-      setReportDate(todayInputValue());
+      resetReportForm();
       await onSaved();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save report");
@@ -700,7 +848,7 @@ function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => 
         </div>
         <div className="grid gap-5 p-5 md:grid-cols-2 md:p-7">
           <Field label="Project" required>
-            <Select name="projectId" required>
+            <Select name="projectId" value={projectId} onValueChange={setProjectId} required>
               <SelectTrigger className="w-full"><SelectValue placeholder="Select project" /></SelectTrigger>
               <SelectContent>
                 {projects.map((project) => <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>)}
@@ -721,28 +869,48 @@ function AddReport({ projects, onSaved }: { projects: Project[]; onSaved: () => 
               {type === "weekly" ? `Week of ${periodLabel}` : type === "monthly" ? periodLabel : periodLabel}
             </span>
           </Field>
+          {type !== "daily" && (
+            <div className="md:col-span-2 rounded-2xl border border-dashed border-[#cbc9ef] bg-[#f8f8ff] p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-[#201e38]">
+                    Generate {type} report
+                  </h2>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">
+                    {type === "weekly"
+                      ? "Compile your submitted daily reports for the selected week and project."
+                      : "Compile your submitted weekly reports for the selected month and project."}
+                  </p>
+                </div>
+                <Button type="button" variant="outline" disabled={saving} onClick={generatePeriodReport} className="shrink-0 rounded-xl bg-white">
+                  <Sparkles className="size-4" />
+                  Generate {type}
+                </Button>
+              </div>
+            </div>
+          )}
           <Field label={type === "monthly" ? "Major achievements" : type === "weekly" ? "Key tasks completed" : "What I worked on today"} required wide>
-            <Textarea name="completedWork" rows={4} placeholder="Use short, specific statements..." required />
+            <Textarea name="completedWork" rows={4} placeholder="Use short, specific statements..." value={draftFields.completedWork} onChange={(event) => updateDraftField("completedWork", event.target.value)} required />
           </Field>
-          <Field label="Work still in progress" wide><Textarea name="workInProgress" rows={3} /></Field>
-          <Field label={type === "daily" ? "What I plan to do next" : type === "weekly" ? "Next week priorities" : "Next month priorities"} wide><Textarea name="plannedWork" rows={3} /></Field>
+          <Field label="Work still in progress" wide><Textarea name="workInProgress" rows={3} value={draftFields.workInProgress} onChange={(event) => updateDraftField("workInProgress", event.target.value)} /></Field>
+          <Field label={type === "daily" ? "What I plan to do next" : type === "weekly" ? "Next week priorities" : "Next month priorities"} wide><Textarea name="plannedWork" rows={3} value={draftFields.plannedWork} onChange={(event) => updateDraftField("plannedWork", event.target.value)} /></Field>
           <Field label="Priority" required>
-            <Select name="priority" defaultValue="medium">
+            <Select name="priority" value={priority} onValueChange={setPriority}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>{["low", "medium", "high", "critical"].map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
           <Field label="Current status" required>
-            <Select name="status" defaultValue="in_progress">
+            <Select name="status" value={statusValue} onValueChange={setStatusValue}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>{reportStatuses.map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
-          <Field label="Blockers or showstoppers" wide><Textarea name="blockers" rows={3} /></Field>
-          <Field label="Support needed"><Textarea name="supportNeeded" rows={3} /></Field>
-          <Field label="Decisions needed"><Textarea name="decisionsNeeded" rows={3} /></Field>
-          <Field label="Documentation links" wide><Input name="documentationLinks" type="url" placeholder="https://docs.google.com/..." /></Field>
-          <Field label="Additional notes" wide><Textarea name="additionalNotes" rows={3} /></Field>
+          <Field label="Blockers or showstoppers" wide><Textarea name="blockers" rows={3} value={draftFields.blockers} onChange={(event) => updateDraftField("blockers", event.target.value)} /></Field>
+          <Field label="Support needed (Optional)"><Textarea name="supportNeeded" rows={3} value={draftFields.supportNeeded} onChange={(event) => updateDraftField("supportNeeded", event.target.value)} /></Field>
+          <Field label="Decisions needed (Optional)"><Textarea name="decisionsNeeded" rows={3} value={draftFields.decisionsNeeded} onChange={(event) => updateDraftField("decisionsNeeded", event.target.value)} /></Field>
+          <Field label="Documentation links (Optional)" wide><Input name="documentationLinks" type="url" placeholder="https://docs.google.com/..." value={draftFields.documentationLinks} onChange={(event) => updateDraftField("documentationLinks", event.target.value)} /></Field>
+          <Field label="Additional notes (Optional)" wide><Textarea name="additionalNotes" rows={3} value={draftFields.additionalNotes} onChange={(event) => updateDraftField("additionalNotes", event.target.value)} /></Field>
         </div>
         <div className="flex flex-col-reverse gap-2 border-t bg-[#fafbfe] p-5 sm:flex-row sm:justify-end md:px-7">
           <Button type="button" variant="outline" disabled={saving} onClick={(event) => {
@@ -770,16 +938,36 @@ function ReportsView({
   const [search, setSearch] = useState(initialSearch);
   const [type, setType] = useState("all");
   const [status, setStatus] = useState("all");
+  const [owner, setOwner] = useState("all");
+  const [project, setProject] = useState("all");
+  const [submittedDate, setSubmittedDate] = useState("");
+  const owners = Array.from(new Map(reports.map((report) => [report.user_id, report.owner_name])).entries())
+    .sort((left, right) => left[1].localeCompare(right[1]));
+  const projects = Array.from(new Map(reports.map((report) => [report.project_id, report.project_name])).entries())
+    .sort((left, right) => left[1].localeCompare(right[1]));
   const filtered = reports.filter((report) =>
     (type === "all" || report.report_type === type) &&
     (status === "all" || report.status === status) &&
-    `${report.owner_name} ${report.project_name} ${report.completed_work} ${report.blockers}`.toLowerCase().includes(search.toLowerCase()),
+    (owner === "all" || report.user_id === owner) &&
+    (project === "all" || report.project_id === project) &&
+    (!submittedDate || reportSubmittedDateInputValue(report) === submittedDate) &&
+    `${report.owner_name} ${report.project_name} ${report.period_label} ${report.completed_work} ${report.blockers}`.toLowerCase().includes(search.toLowerCase()),
   );
+  const filtersApplied = Boolean(search || type !== "all" || status !== "all" || owner !== "all" || project !== "all" || submittedDate);
+
+  function clearFilters() {
+    setSearch("");
+    setType("all");
+    setStatus("all");
+    setOwner("all");
+    setProject("all");
+    setSubmittedDate("");
+  }
 
   return (
     <>
       <PageHeader eyebrow="Report history" title={title} copy="Search, filter, and review structured updates across the work you can access." />
-      <div className="mb-4 grid gap-3 rounded-2xl border bg-white p-4 md:grid-cols-[1fr_180px_180px]">
+      <div className="mb-4 grid gap-3 rounded-2xl border bg-white p-4 md:grid-cols-2 xl:grid-cols-[minmax(220px,1.4fr)_160px_170px_180px_180px_170px_auto]">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
           <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder="Search reports or blockers..." />
@@ -800,6 +988,30 @@ function ReportsView({
             {reportStatuses.map((value) => <SelectItem value={value} key={value}>{titleCase(value)}</SelectItem>)}
           </SelectContent>
         </Select>
+        <Select value={owner} onValueChange={setOwner}>
+          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All owners</SelectItem>
+            {owners.map(([id, name]) => <SelectItem value={id} key={id}>{name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <Select value={project} onValueChange={setProject}>
+          <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All projects</SelectItem>
+            {projects.map(([id, name]) => <SelectItem value={id} key={id}>{name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <Input
+          aria-label="Date submitted"
+          type="date"
+          value={submittedDate}
+          max={todayInputValue()}
+          onChange={(event) => setSubmittedDate(event.target.value)}
+        />
+        <Button type="button" variant="outline" disabled={!filtersApplied} onClick={clearFilters} className="rounded-xl bg-white">
+          Clear
+        </Button>
       </div>
       {filtered.length ? <Panel><ReportTable reports={filtered} onSelect={onSelect} /></Panel> : <EmptyState title="No matching reports" copy="Try changing your search or filters." />}
     </>
