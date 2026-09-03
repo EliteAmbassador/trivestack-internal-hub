@@ -1,5 +1,4 @@
 import { getWorkspaceDb } from "@/db/workspace-db";
-import { getChatGPTUser } from "../../chatgpt-auth";
 
 export const runtime = "nodejs";
 
@@ -306,9 +305,6 @@ async function currentIdentity(request: Request) {
     if (sessionUser) return { displayName: sessionUser.full_name, email: sessionUser.email };
   }
 
-  const identity = await getChatGPTUser();
-  if (identity) return { displayName: identity.displayName, email: identity.email };
-
   throw new Response("Workspace identity unavailable", { status: 403 });
 }
 
@@ -383,8 +379,15 @@ async function loginUser(payload: Record<string, unknown>, request: Request) {
   const user = await db.prepare("SELECT id, full_name, email, password_hash FROM users WHERE email = ? AND status = 'active'")
     .bind(email).first<{ id: string; full_name: string; email: string; password_hash: string | null }>();
   if (!user) return Response.json({ error: "No active account found. Ask the super admin for an invite." }, { status: 404 });
-  if (!user.password_hash) return Response.json({ error: "Password is not set for this account. Ask the super admin to send a fresh invite." }, { status: 403 });
-  if (!(await verifyPassword(password, user.password_hash))) return Response.json({ error: "Invalid email or password" }, { status: 403 });
+  if (!user.password_hash) {
+    if (user.email !== INITIAL_SUPER_ADMIN.email) {
+      return Response.json({ error: "Password is not set for this account. Ask the super admin to send a fresh invite." }, { status: 403 });
+    }
+    if (password.length < PASSWORD_MIN_LENGTH) return Response.json({ error: "Password must be at least 8 characters" }, { status: 400 });
+    await db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").bind(await hashPassword(password), user.id).run();
+  } else if (!(await verifyPassword(password, user.password_hash))) {
+    return Response.json({ error: "Invalid email or password" }, { status: 403 });
+  }
 
   const sessionToken = crypto.randomUUID();
   await db.batch([

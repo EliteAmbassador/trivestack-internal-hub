@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS users (
   id text PRIMARY KEY NOT NULL,
   full_name text NOT NULL,
   email text NOT NULL,
+  password_hash text,
   role text DEFAULT 'team_member' NOT NULL,
   team text DEFAULT 'Product' NOT NULL,
   job_title text DEFAULT 'Team Member' NOT NULL,
