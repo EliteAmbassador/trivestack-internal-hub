@@ -967,14 +967,17 @@ function AddReport({
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
-                  <Textarea
-                    value={item.text}
-                    onChange={(event) => updatePlannedItem(item.id, { text: event.target.value })}
-                    rows={2}
-                    placeholder="Describe the next task..."
-                    className="mt-2 bg-white"
-                  />
-                  <div className="mt-3 max-w-xs">
+                  <div className="mt-2 grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px] sm:items-start">
+                    <label className="grid gap-2 text-sm font-semibold text-[#312e4c]">
+                      <span>Description</span>
+                      <Textarea
+                        value={item.text}
+                        onChange={(event) => updatePlannedItem(item.id, { text: event.target.value })}
+                        rows={2}
+                        placeholder="Describe the next task..."
+                        className="bg-white"
+                      />
+                    </label>
                     <Field label="Priority">
                       <Select value={item.priority} onValueChange={(value) => updatePlannedItem(item.id, { priority: value })}>
                         <SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger>
