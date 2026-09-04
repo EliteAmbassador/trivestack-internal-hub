@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS reports (
   completed_work text NOT NULL,
   work_in_progress text DEFAULT '' NOT NULL,
   planned_work text DEFAULT '' NOT NULL,
+  planned_work_items text,
   blockers text DEFAULT '' NOT NULL,
   support_needed text DEFAULT '' NOT NULL,
   decisions_needed text DEFAULT '' NOT NULL,

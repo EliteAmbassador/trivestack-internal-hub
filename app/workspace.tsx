@@ -117,6 +117,7 @@ type Report = {
   completed_work: string;
   work_in_progress: string;
   planned_work: string;
+  planned_work_items: string | null;
   blockers: string;
   support_needed: string;
   decisions_needed: string;
@@ -126,6 +127,12 @@ type Report = {
   additional_notes: string;
   submitted_at: string | null;
   created_at: string;
+};
+type PlannedWorkItem = {
+  id: string;
+  text: string;
+  priority: string;
+  status: string;
 };
 type Invitation = {
   id: string;
@@ -157,7 +164,6 @@ type WorkspaceData = {
 type ReportDraftFields = {
   completedWork: string;
   workInProgress: string;
-  plannedWork: string;
   blockers: string;
   supportNeeded: string;
   decisionsNeeded: string;
@@ -307,7 +313,6 @@ const weekBounds = (dateInput: string) => {
 const emptyReportDraftFields = (): ReportDraftFields => ({
   completedWork: "",
   workInProgress: "",
-  plannedWork: "",
   blockers: "",
   supportNeeded: "",
   decisionsNeeded: "",
@@ -317,7 +322,6 @@ const emptyReportDraftFields = (): ReportDraftFields => ({
 const fieldMap: Record<keyof ReportDraftFields, keyof Report> = {
   completedWork: "completed_work",
   workInProgress: "work_in_progress",
-  plannedWork: "planned_work",
   blockers: "blockers",
   supportNeeded: "support_needed",
   decisionsNeeded: "decisions_needed",
@@ -336,6 +340,35 @@ const compiledSection = (reports: Report[], field: keyof ReportDraftFields) =>
 const priorityWeight: Record<string, number> = { low: 1, medium: 2, high: 3, critical: 4 };
 const highestPriority = (reports: Report[]) =>
   reports.reduce((winner, report) => (priorityWeight[report.priority] > priorityWeight[winner] ? report.priority : winner), "medium");
+const newPlannedWorkItem = (values: Partial<PlannedWorkItem> = {}): PlannedWorkItem => ({
+  id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+  text: "",
+  priority: "medium",
+  status: "not_started",
+  ...values,
+});
+const plannedItemsFromReport = (report: Report): PlannedWorkItem[] => {
+  if (report.planned_work_items) {
+    try {
+      const parsed = JSON.parse(report.planned_work_items);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((item, index) => ({
+            id: String(item.id || `${report.id}-${index}`),
+            text: String(item.text ?? "").trim(),
+            priority: String(item.priority ?? "medium"),
+            status: String(item.status ?? "not_started"),
+          }))
+          .filter((item) => item.text);
+      }
+    } catch {
+      // Fall through to the legacy text field.
+    }
+  }
+  return report.planned_work.trim()
+    ? [newPlannedWorkItem({ id: report.id, text: report.planned_work.trim(), priority: report.priority, status: report.status })]
+    : [];
+};
 
 async function postAction(payload: Record<string, unknown>) {
   const response = await fetch("/api/workspace", {
@@ -744,6 +777,7 @@ function AddReport({
   const [priority, setPriority] = useState("medium");
   const [statusValue, setStatusValue] = useState("in_progress");
   const [draftFields, setDraftFields] = useState<ReportDraftFields>(emptyReportDraftFields);
+  const [plannedItems, setPlannedItems] = useState<PlannedWorkItem[]>(() => [newPlannedWorkItem()]);
   const [saving, setSaving] = useState(false);
   const periodLabel = reportPeriodLabel(type, reportDate);
 
@@ -757,6 +791,19 @@ function AddReport({
     setPriority("medium");
     setStatusValue("in_progress");
     setDraftFields(emptyReportDraftFields());
+    setPlannedItems([newPlannedWorkItem()]);
+  }
+
+  function updatePlannedItem(id: string, updates: Partial<PlannedWorkItem>) {
+    setPlannedItems((current) => current.map((item) => item.id === id ? { ...item, ...updates } : item));
+  }
+
+  function removePlannedItem(id: string) {
+    setPlannedItems((current) => current.length === 1 ? [newPlannedWorkItem()] : current.filter((item) => item.id !== id));
+  }
+
+  function addPlannedItem() {
+    setPlannedItems((current) => [...current, newPlannedWorkItem()]);
   }
 
   function generatedStatus(sourceReports: Report[]) {
@@ -799,13 +846,22 @@ function AddReport({
     setDraftFields({
       completedWork: compiledSection(selectedSources, "completedWork"),
       workInProgress: compiledSection(selectedSources, "workInProgress"),
-      plannedWork: compiledSection(selectedSources, "plannedWork"),
       blockers: compiledSection(selectedSources, "blockers"),
       supportNeeded: compiledSection(selectedSources, "supportNeeded"),
       decisionsNeeded: compiledSection(selectedSources, "decisionsNeeded"),
       documentationLinks: selectedSources.map((report) => report.documentation_links.trim()).find(Boolean) ?? "",
       additionalNotes: `Generated from ${selectedSources.length} ${sourceType} ${selectedSources.length === 1 ? "report" : "reports"}.`,
     });
+    const generatedPlannedItems = selectedSources.flatMap((report) =>
+      plannedItemsFromReport(report).map((item) =>
+        newPlannedWorkItem({
+          text: `${report.period_label}: ${item.text}`,
+          priority: item.priority,
+          status: item.status,
+        }),
+      ),
+    );
+    setPlannedItems(generatedPlannedItems.length ? generatedPlannedItems : [newPlannedWorkItem()]);
     setPriority(highestPriority(selectedSources));
     setStatusValue(generatedStatus(selectedSources));
     toast.success(type === "weekly" ? "Weekly report drafted from daily reports." : "Monthly report drafted from weekly reports.");
@@ -893,7 +949,53 @@ function AddReport({
             <Textarea name="completedWork" rows={4} placeholder="Use short, specific statements..." value={draftFields.completedWork} onChange={(event) => updateDraftField("completedWork", event.target.value)} required />
           </Field>
           <Field label="Work still in progress" wide><Textarea name="workInProgress" rows={3} value={draftFields.workInProgress} onChange={(event) => updateDraftField("workInProgress", event.target.value)} /></Field>
-          <Field label={type === "daily" ? "What I plan to do next" : type === "weekly" ? "Next week priorities" : "Next month priorities"} wide><Textarea name="plannedWork" rows={3} value={draftFields.plannedWork} onChange={(event) => updateDraftField("plannedWork", event.target.value)} /></Field>
+          <div className="grid content-start gap-3 text-sm font-semibold text-[#312e4c] md:col-span-2">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>{type === "daily" ? "What I plan to do next" : type === "weekly" ? "Next week priorities" : "Next month priorities"}</span>
+              <Button type="button" variant="outline" size="sm" onClick={addPlannedItem} className="w-fit rounded-xl bg-white">
+                <Plus className="size-4" />
+                Add item
+              </Button>
+            </div>
+            <input
+              type="hidden"
+              name="plannedWorkItems"
+              value={JSON.stringify(plannedItems.map(({ text, priority, status }) => ({ text, priority, status })))}
+            />
+            <div className="space-y-3">
+              {plannedItems.map((item, index) => (
+                <div key={item.id} className="rounded-2xl border bg-[#fafbfe] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs font-bold uppercase tracking-[.08em] text-slate-400">Item {index + 1}</span>
+                    <Button type="button" variant="ghost" size="icon" onClick={() => removePlannedItem(item.id)} className="size-8 rounded-xl text-slate-400 hover:text-rose-600">
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                  <Textarea
+                    value={item.text}
+                    onChange={(event) => updatePlannedItem(item.id, { text: event.target.value })}
+                    rows={2}
+                    placeholder="Describe the next task..."
+                    className="mt-2 bg-white"
+                  />
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Field label="Priority">
+                      <Select value={item.priority} onValueChange={(value) => updatePlannedItem(item.id, { priority: value })}>
+                        <SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger>
+                        <SelectContent>{["low", "medium", "high", "critical"].map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </Field>
+                    <Field label="Current status">
+                      <Select value={item.status} onValueChange={(value) => updatePlannedItem(item.id, { status: value })}>
+                        <SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger>
+                        <SelectContent>{reportStatuses.map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </Field>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
           <Field label="Priority" required>
             <Select name="priority" value={priority} onValueChange={setPriority}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
@@ -1640,7 +1742,7 @@ function ReportDialog({ report, onOpenChange }: { report: Report | null; onOpenC
             <div className="mt-3 grid gap-5">
               <Detail label="Completed work" value={report.completed_work} />
               <Detail label="Work in progress" value={report.work_in_progress} />
-              <Detail label="Planned next" value={report.planned_work} />
+              <PlannedWorkDetail report={report} />
               {report.blockers && <div className="rounded-xl border border-rose-200 bg-rose-50 p-4"><p className="text-xs font-bold uppercase tracking-wider text-rose-600">Blocker</p><p className="mt-2 text-sm leading-6 text-rose-900">{report.blockers}</p></div>}
               <div className="grid gap-4 sm:grid-cols-2"><Detail label="Support needed" value={report.support_needed} /><Detail label="Decision needed" value={report.decisions_needed} /></div>
               {report.documentation_links && <a className="flex items-center gap-2 text-sm font-semibold text-[#5652a3]" href={report.documentation_links} target="_blank" rel="noreferrer"><Link2 className="size-4" />Open documentation</a>}
@@ -1687,12 +1789,44 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge variant="outline" className={`rounded-full px-2.5 py-1 text-[10px] ${statusStyle[status] ?? "border-slate-200 bg-slate-50 text-slate-600"}`}><CircleDot className="size-2.5" />{titleCase(status)}</Badge>;
 }
 
+function PriorityBadge({ priority }: { priority: string }) {
+  const styles: Record<string, string> = {
+    low: "border-slate-200 bg-slate-50 text-slate-600",
+    medium: "border-blue-200 bg-blue-50 text-blue-700",
+    high: "border-orange-200 bg-orange-50 text-orange-700",
+    critical: "border-rose-200 bg-rose-50 text-rose-700",
+  };
+  return <Badge variant="outline" className={`rounded-full px-2.5 py-1 text-[10px] ${styles[priority] ?? styles.medium}`}>{titleCase(priority)}</Badge>;
+}
+
 function Avatar({ name }: { name: string }) {
   return <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-[#eeeffb] text-[11px] font-bold text-[#4b478f]">{initials(name)}</div>;
 }
 
 function Detail({ label, value }: { label: string; value?: string }) {
   return <div><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{label}</p><p className="mt-1.5 whitespace-pre-line text-sm leading-6 text-slate-700">{value || "Not provided"}</p></div>;
+}
+
+function PlannedWorkDetail({ report }: { report: Report }) {
+  const items = plannedItemsFromReport(report);
+  if (!items.length) return <Detail label="Planned next" value="" />;
+
+  return (
+    <div>
+      <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Planned next</p>
+      <div className="mt-2 space-y-2">
+        {items.map((item, index) => (
+          <div key={`${item.id}-${index}`} className="rounded-xl border bg-[#fafbfe] p-3">
+            <p className="whitespace-pre-line text-sm leading-6 text-slate-700">{item.text}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <PriorityBadge priority={item.priority} />
+              <StatusBadge status={item.status} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function EmptyState({ title, copy }: { title: string; copy: string }) {

@@ -57,6 +57,12 @@ type InviteRow = {
   expires_at: string;
 };
 
+type PlannedWorkItem = {
+  text: string;
+  priority: string;
+  status: string;
+};
+
 type SettingsRow = {
   key: string;
   value: string;
@@ -83,6 +89,10 @@ function isOneOf<const T extends readonly string[]>(
 function clean(payload: Record<string, unknown>, key: string, fallback = "") {
   const value = payload[key];
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function titleCase(value: string) {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 function validHttpUrl(value: string) {
@@ -119,6 +129,51 @@ function periodLabelFor(reportType: string, reportDate: string) {
     return `${format.format(start)} - ${format.format(end)}`;
   }
   return new Intl.DateTimeFormat("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function jsonError(message: string, status = 400) {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function parsePlannedWorkItems(payload: Record<string, unknown>) {
+  const raw = clean(payload, "plannedWorkItems");
+  if (!raw) return [] as PlannedWorkItem[];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw jsonError("Planned work items are invalid");
+  }
+
+  if (!Array.isArray(parsed)) throw jsonError("Planned work items are invalid");
+
+  const items = parsed
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const text = typeof record.text === "string" ? record.text.trim() : "";
+      const priority = typeof record.priority === "string" ? record.priority.trim() : "medium";
+      const status = typeof record.status === "string" ? record.status.trim() : "not_started";
+      return text ? { text, priority, status } : null;
+    })
+    .filter((item): item is PlannedWorkItem => !!item);
+
+  if (items.length > 25) throw jsonError("Add 25 planned items or fewer");
+  if (items.some((item) => !isOneOf(PRIORITIES, item.priority) || !isOneOf(REPORT_STATUSES, item.status))) {
+    throw jsonError("Each planned item needs a valid priority and status");
+  }
+
+  return items;
+}
+
+function plannedWorkSummary(items: PlannedWorkItem[]) {
+  return items
+    .map((item) => `- ${item.text} (${titleCase(item.priority)}, ${titleCase(item.status)})`)
+    .join("\n");
 }
 
 function bytesToHex(bytes: Uint8Array) {
@@ -236,8 +291,9 @@ function ensureWorkspaceSchema() {
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)"),
     db.prepare("CREATE TABLE IF NOT EXISTS projects (id text PRIMARY KEY NOT NULL, name text NOT NULL, description text DEFAULT '' NOT NULL, owner_id text, team text DEFAULT 'Product' NOT NULL, status text DEFAULT 'active' NOT NULL, start_date text, end_date text, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (owner_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS projects_name_unique ON projects (name)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS reports (id text PRIMARY KEY NOT NULL, user_id text NOT NULL, report_type text NOT NULL, project_id text NOT NULL, report_date text, period_label text NOT NULL, completed_work text NOT NULL, work_in_progress text DEFAULT '' NOT NULL, planned_work text DEFAULT '' NOT NULL, blockers text DEFAULT '' NOT NULL, support_needed text DEFAULT '' NOT NULL, decisions_needed text DEFAULT '' NOT NULL, documentation_links text DEFAULT '' NOT NULL, priority text DEFAULT 'medium' NOT NULL, status text DEFAULT 'in_progress' NOT NULL, additional_notes text DEFAULT '' NOT NULL, submitted_at timestamptz, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (project_id) REFERENCES projects(id) ON UPDATE no action ON DELETE no action)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS reports (id text PRIMARY KEY NOT NULL, user_id text NOT NULL, report_type text NOT NULL, project_id text NOT NULL, report_date text, period_label text NOT NULL, completed_work text NOT NULL, work_in_progress text DEFAULT '' NOT NULL, planned_work text DEFAULT '' NOT NULL, planned_work_items text, blockers text DEFAULT '' NOT NULL, support_needed text DEFAULT '' NOT NULL, decisions_needed text DEFAULT '' NOT NULL, documentation_links text DEFAULT '' NOT NULL, priority text DEFAULT 'medium' NOT NULL, status text DEFAULT 'in_progress' NOT NULL, additional_notes text DEFAULT '' NOT NULL, submitted_at timestamptz, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (project_id) REFERENCES projects(id) ON UPDATE no action ON DELETE no action)"),
     db.prepare("ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_date text"),
+    db.prepare("ALTER TABLE reports ADD COLUMN IF NOT EXISTS planned_work_items text"),
     db.prepare("CREATE TABLE IF NOT EXISTS comments (id text PRIMARY KEY NOT NULL, report_id text NOT NULL, user_id text NOT NULL, comment text NOT NULL, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (report_id) REFERENCES reports(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
     db.prepare("CREATE TABLE IF NOT EXISTS audit_logs (id integer GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY NOT NULL, user_id text NOT NULL, action text NOT NULL, entity_type text NOT NULL, entity_id text NOT NULL, details text DEFAULT '' NOT NULL, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
     db.prepare("CREATE TABLE IF NOT EXISTS invitations (id text PRIMARY KEY NOT NULL, token text NOT NULL, email text NOT NULL, role text DEFAULT 'team_member' NOT NULL, team text DEFAULT 'Product' NOT NULL, job_title text DEFAULT 'Team Member' NOT NULL, invited_by text NOT NULL, status text DEFAULT 'pending' NOT NULL, expires_at timestamptz NOT NULL, accepted_at timestamptz, accepted_by text, created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL, FOREIGN KEY (invited_by) REFERENCES users(id) ON UPDATE no action ON DELETE no action, FOREIGN KEY (accepted_by) REFERENCES users(id) ON UPDATE no action ON DELETE no action)"),
@@ -639,13 +695,15 @@ export async function POST(request: Request) {
     if (!isOneOf(REPORT_STATUSES, status)) return Response.json({ error: "Invalid status" }, { status: 400 });
     if (!["draft", "submit"].includes(submitMode)) return Response.json({ error: "Invalid submit mode" }, { status: 400 });
     if (!validHttpUrl(documentationLinks)) return Response.json({ error: "Documentation link must be a valid HTTP URL" }, { status: 400 });
+    const plannedItems = parsePlannedWorkItems(payload);
+    const plannedWork = plannedWorkSummary(plannedItems);
     const project = await db.prepare("SELECT id FROM projects WHERE id = ?").bind(projectId).first<{ id: string }>();
     if (!project) return Response.json({ error: "Project not found" }, { status: 404 });
     const id = crypto.randomUUID();
     const submittedAt = submitMode === "draft" ? null : new Date().toISOString();
     const periodLabel = periodLabelFor(reportType, reportDate);
     await db.batch([
-      db.prepare("INSERT INTO reports (id, user_id, report_type, project_id, report_date, period_label, completed_work, work_in_progress, planned_work, blockers, support_needed, decisions_needed, documentation_links, priority, status, additional_notes, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, reportType, projectId, reportDate, periodLabel, completedWork, clean(payload, "workInProgress"), clean(payload, "plannedWork"), clean(payload, "blockers"), clean(payload, "supportNeeded"), clean(payload, "decisionsNeeded"), documentationLinks, priority, status, clean(payload, "additionalNotes"), submittedAt),
+      db.prepare("INSERT INTO reports (id, user_id, report_type, project_id, report_date, period_label, completed_work, work_in_progress, planned_work, planned_work_items, blockers, support_needed, decisions_needed, documentation_links, priority, status, additional_notes, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, user.id, reportType, projectId, reportDate, periodLabel, completedWork, clean(payload, "workInProgress"), plannedWork, JSON.stringify(plannedItems), clean(payload, "blockers"), clean(payload, "supportNeeded"), clean(payload, "decisionsNeeded"), documentationLinks, priority, status, clean(payload, "additionalNotes"), submittedAt),
       db.prepare("INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, 'report', ?, ?)").bind(user.id, submittedAt ? "report_submitted" : "report_drafted", id, reportType),
     ]);
     return Response.json({ ok: true, id }, { status: 201 });

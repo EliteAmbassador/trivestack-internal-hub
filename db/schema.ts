@@ -36,6 +36,7 @@ export const reports = pgTable("reports", {
   completedWork: text("completed_work").notNull(),
   workInProgress: text("work_in_progress").notNull().default(""),
   plannedWork: text("planned_work").notNull().default(""),
+  plannedWorkItems: text("planned_work_items"),
   blockers: text("blockers").notNull().default(""),
   supportNeeded: text("support_needed").notNull().default(""),
   decisionsNeeded: text("decisions_needed").notNull().default(""),
