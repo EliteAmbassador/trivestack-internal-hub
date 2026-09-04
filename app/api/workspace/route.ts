@@ -60,7 +60,6 @@ type InviteRow = {
 type PlannedWorkItem = {
   text: string;
   priority: string;
-  status: string;
 };
 
 type SettingsRow = {
@@ -157,14 +156,13 @@ function parsePlannedWorkItems(payload: Record<string, unknown>) {
       const record = item as Record<string, unknown>;
       const text = typeof record.text === "string" ? record.text.trim() : "";
       const priority = typeof record.priority === "string" ? record.priority.trim() : "medium";
-      const status = typeof record.status === "string" ? record.status.trim() : "not_started";
-      return text ? { text, priority, status } : null;
+      return text ? { text, priority } : null;
     })
     .filter((item): item is PlannedWorkItem => !!item);
 
   if (items.length > 25) throw jsonError("Add 25 planned items or fewer");
-  if (items.some((item) => !isOneOf(PRIORITIES, item.priority) || !isOneOf(REPORT_STATUSES, item.status))) {
-    throw jsonError("Each planned item needs a valid priority and status");
+  if (items.some((item) => !isOneOf(PRIORITIES, item.priority))) {
+    throw jsonError("Each planned item needs a valid priority");
   }
 
   return items;
@@ -172,7 +170,7 @@ function parsePlannedWorkItems(payload: Record<string, unknown>) {
 
 function plannedWorkSummary(items: PlannedWorkItem[]) {
   return items
-    .map((item) => `- ${item.text} (${titleCase(item.priority)}, ${titleCase(item.status)})`)
+    .map((item) => `- ${item.text} (${titleCase(item.priority)})`)
     .join("\n");
 }
 

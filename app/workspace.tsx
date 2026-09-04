@@ -132,7 +132,6 @@ type PlannedWorkItem = {
   id: string;
   text: string;
   priority: string;
-  status: string;
 };
 type Invitation = {
   id: string;
@@ -344,7 +343,6 @@ const newPlannedWorkItem = (values: Partial<PlannedWorkItem> = {}): PlannedWorkI
   id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
   text: "",
   priority: "medium",
-  status: "not_started",
   ...values,
 });
 const plannedItemsFromReport = (report: Report): PlannedWorkItem[] => {
@@ -357,7 +355,6 @@ const plannedItemsFromReport = (report: Report): PlannedWorkItem[] => {
             id: String(item.id || `${report.id}-${index}`),
             text: String(item.text ?? "").trim(),
             priority: String(item.priority ?? "medium"),
-            status: String(item.status ?? "not_started"),
           }))
           .filter((item) => item.text);
       }
@@ -366,7 +363,7 @@ const plannedItemsFromReport = (report: Report): PlannedWorkItem[] => {
     }
   }
   return report.planned_work.trim()
-    ? [newPlannedWorkItem({ id: report.id, text: report.planned_work.trim(), priority: report.priority, status: report.status })]
+    ? [newPlannedWorkItem({ id: report.id, text: report.planned_work.trim(), priority: report.priority })]
     : [];
 };
 
@@ -857,7 +854,6 @@ function AddReport({
         newPlannedWorkItem({
           text: `${report.period_label}: ${item.text}`,
           priority: item.priority,
-          status: item.status,
         }),
       ),
     );
@@ -960,7 +956,7 @@ function AddReport({
             <input
               type="hidden"
               name="plannedWorkItems"
-              value={JSON.stringify(plannedItems.map(({ text, priority, status }) => ({ text, priority, status })))}
+              value={JSON.stringify(plannedItems.map(({ text, priority }) => ({ text, priority })))}
             />
             <div className="space-y-3">
               {plannedItems.map((item, index) => (
@@ -978,17 +974,11 @@ function AddReport({
                     placeholder="Describe the next task..."
                     className="mt-2 bg-white"
                   />
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div className="mt-3 max-w-xs">
                     <Field label="Priority">
                       <Select value={item.priority} onValueChange={(value) => updatePlannedItem(item.id, { priority: value })}>
                         <SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger>
                         <SelectContent>{["low", "medium", "high", "critical"].map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
-                      </Select>
-                    </Field>
-                    <Field label="Current status">
-                      <Select value={item.status} onValueChange={(value) => updatePlannedItem(item.id, { status: value })}>
-                        <SelectTrigger className="w-full bg-white"><SelectValue /></SelectTrigger>
-                        <SelectContent>{reportStatuses.map((value) => <SelectItem key={value} value={value}>{titleCase(value)}</SelectItem>)}</SelectContent>
                       </Select>
                     </Field>
                   </div>
@@ -1820,7 +1810,6 @@ function PlannedWorkDetail({ report }: { report: Report }) {
             <p className="whitespace-pre-line text-sm leading-6 text-slate-700">{item.text}</p>
             <div className="mt-3 flex flex-wrap gap-2">
               <PriorityBadge priority={item.priority} />
-              <StatusBadge status={item.status} />
             </div>
           </div>
         ))}
